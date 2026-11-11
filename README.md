@@ -51,6 +51,11 @@ How it works:
   `__START_AT` / `__END_AT` are timestamps; `__END_AT IS NULL` is the current version.
 - **First run seeds** from each table's current contents. History therefore starts at go-live; it is
   not backfilled to business effective dates.
+- **No `is_current` flag**: AUTO CDC only maintains `__START_AT` / `__END_AT`; derive it when reading
+  (`__END_AT IS NULL AS is_current`).
+- **Change metadata columns** (untracked): `source_change_type` (`insert` on a key's first version,
+  else `update_postimage`), `source_commit_timestamp` (last time the source row was modified, including
+  audit-only touches that don't open a new version) and `source_commit_version`.
 - **Audit columns are untracked** (`created_timestamp`, `updated_timestamp`, ...): a change that only
   touches them updates the current version in place instead of opening a new one.
 - **`pipelines.reset.allowed = false`** on every history table: a pipeline full refresh does not wipe history.
