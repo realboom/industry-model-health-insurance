@@ -3,12 +3,23 @@ resources:
     hi_gold_refresh:
       name: hi-gold-refresh
       description: >-
-        Refreshes the health insurance gold layer: runs the dimensional SDP pipeline
+        Refreshes the health insurance gold layer: enables row tracking on the silver
+        sources (for incremental MV refresh), runs the dimensional SDP pipeline
         (dims, facts, aggregates and the dq_gold_checks expectations gate), then
         (re)creates the gold metric views.
       max_concurrent_runs: 1
       tasks:
+        - task_key: prepare_sources
+          notebook_task:
+            notebook_path: ../src/notebooks/set_table_properties.py
+            base_parameters:
+              silver_catalog: ${var.silver_catalog}
+              tables: ${var.gold_source_tables}
+              properties: delta.enableRowTracking=true,delta.enableDeletionVectors=true
+
         - task_key: refresh_gold
+          depends_on:
+            - task_key: prepare_sources
           pipeline_task:
             pipeline_id: ${resources.pipelines.hi_gold_pipeline.id}
 

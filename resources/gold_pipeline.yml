@@ -7,11 +7,14 @@ resources:
       serverless: true
       photon: true
       channel: CURRENT
-      # Silver is read in batch (materialized views), so the silver tables do not
-      # need Change Data Feed or append-only semantics. Serverless MVs refresh
-      # incrementally where the query shape allows it.
+      # Silver is read in batch by materialized views. Serverless MVs refresh
+      # incrementally when the query shape allows it and the sources have row
+      # tracking (set by the prepare_sources task in hi-gold-refresh).
       configuration:
         silver_catalog: ${var.silver_catalog}
+        # resolved name (dev mode prefixes it), so gold reads the same history schema the
+        # hi-silver-scd2 pipeline writes
+        silver_history_schema: ${resources.schemas.silver_history.name}
         date_dim_start: ${var.date_dim_start}
         date_dim_end: ${var.date_dim_end}
       libraries:

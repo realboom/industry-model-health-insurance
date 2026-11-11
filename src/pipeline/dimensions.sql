@@ -77,15 +77,8 @@ SELECT
   i.lob                                                AS member_lob,
   i.gender,
   year(i.date_of_birth)                                AS birth_year,
-  CAST(floor(months_between(current_date(), i.date_of_birth) / 12) AS INT) AS age,
-  CASE
-    WHEN i.date_of_birth IS NULL THEN 'unknown'
-    WHEN months_between(current_date(), i.date_of_birth) / 12 < 18 THEN '00-17'
-    WHEN months_between(current_date(), i.date_of_birth) / 12 < 35 THEN '18-34'
-    WHEN months_between(current_date(), i.date_of_birth) / 12 < 50 THEN '35-49'
-    WHEN months_between(current_date(), i.date_of_birth) / 12 < 65 THEN '50-64'
-    ELSE '65+'
-  END                                                  AS age_band,
+  -- age / age band are computed at query time (metric views) from birth_year:
+  -- current_date() in a SELECT would force a full recompute of this MV every run.
   i.race,
   i.ethnicity,
   i.language_preference,

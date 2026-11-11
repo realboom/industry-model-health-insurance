@@ -8,6 +8,7 @@
 -- fact_member_month: periodic snapshot. Grain: one row per member per month of
 -- eligibility. Built by exploding member.member_eligibility_span into months.
 -- When spans overlap in a month, the primary coverage (then the latest span) wins.
+-- Months are limited to the dim_date range and to months that have started.
 -- This is the PMPM denominator and the carrier of coverage history.
 -- -----------------------------------------------------------------------------
 CREATE OR REFRESH MATERIALIZED VIEW fact_member_month (
@@ -19,44 +20,65 @@ AS
 WITH spans AS (
   SELECT
     s.*,
-    greatest(trunc(s.effective_date, 'MM'), DATE'${date_dim_start}')            AS span_start_month,
-    least(trunc(coalesce(s.termination_date, current_date()), 'MM'),
-          trunc(current_date(), 'MM'),
-          DATE'${date_dim_end}')                                                AS span_end_month
+    trunc(s.effective_date, 'MM')                                        AS span_start_month,
+    trunc(coalesce(s.termination_date, DATE'${date_dim_end}'), 'MM')     AS span_end_month
   FROM ${silver_catalog}.member.member_eligibility_span s
   WHERE s.identity_id IS NOT NULL
     AND s.effective_date IS NOT NULL
     AND coalesce(s.eligibility_status, '') <> 'pending'
 ),
+months AS (
+  -- calendar months from dim_date (range = date_dim_start .. date_dim_end)
+  SELECT month_start FROM dim_date WHERE day_of_month = 1
+),
 exploded AS (
+  -- join to the month calendar instead of explode(sequence(...)) so the MV stays
+  -- eligible for incremental refresh; future months are excluded in WHERE (time
+  -- functions are only incremental-safe in WHERE)
+  SELECT m.month_start AS member_month_start, sp.*
+  FROM spans sp
+  JOIN months m
+    ON m.month_start BETWEEN sp.span_start_month AND sp.span_end_month
+  WHERE m.month_start <= current_date()
+),
+picked AS (
   SELECT
-    explode(sequence(span_start_month, span_end_month, INTERVAL 1 MONTH)) AS member_month_start,
-    *
-  FROM spans
-  WHERE span_start_month <= span_end_month
+    member_month_start,
+    identity_id                         AS member_id,
+    health_plan_id,
+    group_id,
+    benefit_package_id,
+    provider_network_id,
+    line_of_business,
+    coverage_type,
+    enrollment_type,
+    eligibility_status,
+    is_primary_coverage,
+    member_eligibility_span_id,
+    1                                   AS member_months,
+    premium_amount                      AS span_premium_amount
+  FROM exploded
+  QUALIFY row_number() OVER (
+    PARTITION BY identity_id, member_month_start
+    ORDER BY CASE WHEN is_primary_coverage THEN 0 ELSE 1 END,
+             effective_date DESC,
+             member_eligibility_span_id DESC
+  ) = 1
 )
+-- as-of surrogate keys: dimension version in effect at the start of the month
 SELECT
-  member_month_start,
-  identity_id                         AS member_id,
-  health_plan_id,
-  group_id,
-  benefit_package_id,
-  provider_network_id,
-  line_of_business,
-  coverage_type,
-  enrollment_type,
-  eligibility_status,
-  is_primary_coverage,
-  member_eligibility_span_id,
-  1                                   AS member_months,
-  premium_amount                      AS span_premium_amount
-FROM exploded
-QUALIFY row_number() OVER (
-  PARTITION BY identity_id, member_month_start
-  ORDER BY CASE WHEN is_primary_coverage THEN 0 ELSE 1 END,
-           effective_date DESC,
-           member_eligibility_span_id DESC
-) = 1;
+  p.*,
+  dm.member_sk,
+  dpl.plan_sk
+FROM picked p
+LEFT JOIN dim_member_scd2 dm
+  ON  p.member_id = dm.member_id
+  AND CAST(p.member_month_start AS TIMESTAMP) >= dm.effective_from
+  AND CAST(p.member_month_start AS TIMESTAMP) <  dm.effective_to
+LEFT JOIN dim_plan_scd2 dpl
+  ON  p.health_plan_id = dpl.health_plan_id
+  AND CAST(p.member_month_start AS TIMESTAMP) >= dpl.effective_from
+  AND CAST(p.member_month_start AS TIMESTAMP) <  dpl.effective_to;
 
 -- -----------------------------------------------------------------------------
 -- fact_claim_line: transaction fact. Grain: one row per claim.line.
@@ -140,11 +162,32 @@ SELECT
   mm.health_plan_id,
   mm.line_of_business,
   mm.group_id,
-  mm.provider_network_id
+  mm.provider_network_id,
+  -- as-of surrogate keys: dimension version in effect on the incurred date
+  dm.member_sk,
+  dpr.provider_sk                                         AS rendering_provider_sk,
+  dpb.provider_sk                                         AS billing_provider_sk,
+  dpl.plan_sk
 FROM lines c
 LEFT JOIN fact_member_month mm
   ON  c.member_id = mm.member_id
-  AND trunc(c.incurred_date, 'MM') = mm.member_month_start;
+  AND trunc(c.incurred_date, 'MM') = mm.member_month_start
+LEFT JOIN dim_member_scd2 dm
+  ON  c.member_id = dm.member_id
+  AND CAST(c.incurred_date AS TIMESTAMP) >= dm.effective_from
+  AND CAST(c.incurred_date AS TIMESTAMP) <  dm.effective_to
+LEFT JOIN dim_provider_scd2 dpr
+  ON  c.rendering_provider_id = dpr.provider_id
+  AND CAST(c.incurred_date AS TIMESTAMP) >= dpr.effective_from
+  AND CAST(c.incurred_date AS TIMESTAMP) <  dpr.effective_to
+LEFT JOIN dim_provider_scd2 dpb
+  ON  c.billing_provider_id = dpb.provider_id
+  AND CAST(c.incurred_date AS TIMESTAMP) >= dpb.effective_from
+  AND CAST(c.incurred_date AS TIMESTAMP) <  dpb.effective_to
+LEFT JOIN dim_plan_scd2 dpl
+  ON  mm.health_plan_id = dpl.health_plan_id
+  AND CAST(c.incurred_date AS TIMESTAMP) >= dpl.effective_from
+  AND CAST(c.incurred_date AS TIMESTAMP) <  dpl.effective_to;
 
 -- -----------------------------------------------------------------------------
 -- fact_prior_auth: accumulating snapshot. Grain: one row per PA request, with the
@@ -213,7 +256,11 @@ base AS (
   LEFT JOIN latest_tat      t ON r.pa_request_id = t.pa_request_id
 )
 SELECT
-  *,
+  b.*,
+  -- as-of surrogate keys: dimension version in effect when the request was received
+  dm.member_sk,
+  dpr.provider_sk                                                         AS requesting_provider_sk,
+  dpl.plan_sk,
   (decision_timestamp IS NOT NULL)                                       AS is_decided,
   (decision_type IN ('approved', 'partially_approved'))                  AS is_approved,
   (decision_type = 'denied')                                             AS is_denied,
@@ -228,4 +275,16 @@ SELECT
               <= tat_standard_hours
     END
   )                                                                      AS is_tat_compliant
-FROM base;
+FROM base b
+LEFT JOIN dim_member_scd2 dm
+  ON  b.member_id = dm.member_id
+  AND b.request_timestamp >= dm.effective_from
+  AND b.request_timestamp <  dm.effective_to
+LEFT JOIN dim_provider_scd2 dpr
+  ON  b.requesting_provider_id = dpr.provider_id
+  AND b.request_timestamp >= dpr.effective_from
+  AND b.request_timestamp <  dpr.effective_to
+LEFT JOIN dim_plan_scd2 dpl
+  ON  b.health_plan_id = dpl.health_plan_id
+  AND b.request_timestamp >= dpl.effective_from
+  AND b.request_timestamp <  dpl.effective_to;

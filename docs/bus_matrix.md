@@ -33,4 +33,6 @@
 6. **PCP** is assigned at subscriber level in the model; dependents inherit the subscriber's current PCP.
 7. **PA turnaround** = decision timestamp − request timestamp (hours). TAT compliance prefers the
    source `tat_compliance_event.compliance_flag`, falling back to turnaround ≤ `tat_standard_hours`.
-8. **Reversed claim lines** are kept in `fact_claim_line` but excluded from `agg_pmpm_monthly`.
+8. **Type 1 and Type 2 side by side.** Facts carry natural keys (current-state reporting via Type 1 dims)
+   and as-of surrogate keys (historical reporting via `dim_*_scd2`), looked up on the fact's own date.
+9. **Reversed claim lines** are kept in `fact_claim_line` but excluded from `agg_pmpm_monthly`.

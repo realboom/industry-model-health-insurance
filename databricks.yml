@@ -26,6 +26,12 @@ variables:
       Change Data Feed is enabled on each by the hi-silver-history job. Keep in sync
       with src/silver_history/*.sql.
     default: member.identity,member.subscriber,provider.provider,provider.group_practice,provider.facility,plan.health_plan,plan.benefit_package,employer.group,network.provider_network
+  gold_source_tables:
+    description: >-
+      Comma-separated <domain>.<table> list of silver tables the gold pipeline reads.
+      hi-gold-refresh enables row tracking + deletion vectors on each so the gold
+      materialized views can refresh incrementally. Keep in sync with src/pipeline/*.sql.
+    default: member.identity,member.subscriber,member.lob_assignment,member.pcp_assignment,member.member_eligibility_span,provider.provider,provider.specialty,plan.health_plan,claim.header,claim.line,claim.diagnosis,claim.payment,utilization.pa_request,utilization.pa_decision,utilization.tat_compliance_event
   date_dim_start:
     description: First date in dim_date (YYYY-MM-DD).
     default: "2015-01-01"

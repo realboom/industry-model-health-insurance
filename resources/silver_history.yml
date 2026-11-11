@@ -32,10 +32,11 @@ resources:
       tasks:
         - task_key: enable_cdf
           notebook_task:
-            notebook_path: ../src/notebooks/enable_cdf.py
+            notebook_path: ../src/notebooks/set_table_properties.py
             base_parameters:
               silver_catalog: ${var.silver_catalog}
               tables: ${var.scd2_source_tables}
+              properties: delta.enableChangeDataFeed=true
 
         - task_key: refresh_history
           depends_on:

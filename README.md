@@ -63,7 +63,8 @@ How it works:
 - Already effective-dated tables (`member_eligibility_span`, `enrollment_eligibility_span`,
   `pcp_assignment`, `lob_assignment`, `provider.specialty`, `member.address`) do not need SCD2.
 
-Run `hi-silver-history` after each silver load, then `hi-gold-refresh`.
+Run `hi-silver-history` after each silver load, then `hi-gold-refresh`. The gold pipeline reads the
+history tables, so **`hi-silver-history` must have run at least once before the first gold refresh**.
 
 > **Reinstall warning.** The model installer uses `CREATE OR REPLACE TABLE`. Replacing a source table
 > turns CDF off and breaks that table's history stream. Don't reinstall the model over a catalog whose
@@ -86,6 +87,9 @@ All gold tables are SDP **materialized views** in one pipeline, published to `${
 | `dim_member` | dimension (Type 1) | member (`member.identity`) | `member.identity`, `member.subscriber`, `member.lob_assignment`, `member.pcp_assignment` |
 | `dim_provider` | dimension (Type 1) | provider | `provider.provider`, `provider.specialty` |
 | `dim_plan` | dimension (Type 1) | health plan product | `plan.health_plan` |
+| `dim_member_scd2` | dimension (Type 2) | member version | `history.member_identity_scd2` |
+| `dim_provider_scd2` | dimension (Type 2) | provider version | `history.provider_provider_scd2` |
+| `dim_plan_scd2` | dimension (Type 2) | plan version | `history.plan_health_plan_scd2` |
 | `fact_member_month` | periodic snapshot | member × month | `member.member_eligibility_span` |
 | `fact_claim_line` | transaction | claim line | `claim.line`, `claim.header`, `claim.diagnosis`, `claim.payment` |
 | `fact_prior_auth` | accumulating snapshot | PA request | `utilization.pa_request`, `utilization.pa_decision`, `utilization.tat_compliance_event` |
@@ -100,6 +104,17 @@ Metric views (created by the job after the pipeline):
 | `mv_claims` | Spend, mix and payment lag by claim type, POS, procedure, diagnosis, member demographics, provider specialty |
 | `mv_prior_auth` | PA volume, approval/denial rate, turnaround hours, TAT compliance by request type, service, LOB |
 
+**Type 1 vs Type 2 dimensions.** Facts carry both the natural keys (`member_id`, `rendering_provider_id`,
+`health_plan_id`) for "as it is now" reporting through the Type 1 dims, and surrogate keys (`member_sk`,
+`rendering_provider_sk`, `billing_provider_sk`, `requesting_provider_sk`, `plan_sk`) for "as it was" reporting
+through the Type 2 dims. Surrogate keys are looked up **as of** the fact's date (claim incurred date,
+member-month start, PA request time) with `effective_from <= ts < effective_to`.
+
+Type 2 dims columns: `<entity>_sk` (`xxhash64(natural key, version start)`, stable across recomputes),
+`effective_from` / `effective_to` (exclusive; open version ends 9999-12-31), `is_current`, `version_number`.
+The **first version of each key is back-dated to 1900-01-01** because silver history only starts at go-live;
+otherwise facts dated before go-live would find no version.
+
 See [docs/bus_matrix.md](docs/bus_matrix.md) for the bus matrix and design decisions.
 
 ## Prerequisites
@@ -111,7 +126,7 @@ See [docs/bus_matrix.md](docs/bus_matrix.md) for the bus matrix and design decis
 2. An existing **gold catalog** (the bundle creates the schema, not the catalog).
 3. Databricks CLI ≥ 0.250 authenticated to the workspace, serverless enabled.
 4. The deploying identity needs `USE CATALOG` + `SELECT` + `CREATE SCHEMA` on the silver catalog,
-   `MODIFY` (to enable CDF via `ALTER TABLE`) on the history source tables, and
+   `MODIFY` (to set CDF / row tracking via `ALTER TABLE`) on the source tables, and
    `USE CATALOG` + `CREATE SCHEMA` on the gold catalog.
 
 ## Deploy and run
@@ -153,16 +168,45 @@ targets:
 | `gold_schema` | `core` | Gold schema (created by the bundle) |
 | `silver_history_schema` | `history` | Silver schema for SCD2 history tables (created by the bundle) |
 | `scd2_source_tables` | 9 master tables | Tables `hi-silver-history` enables CDF on; keep in sync with `src/silver_history/` |
+| `gold_source_tables` | 15 silver tables | Tables `hi-gold-refresh` enables row tracking + deletion vectors on; keep in sync with `src/pipeline/` |
 | `date_dim_start` / `date_dim_end` | `2015-01-01` / `2035-12-31` | `dim_date` range; also clamps member-month explosion |
+
+## Incremental refresh
+
+The gold tables are serverless materialized views, which refresh **incrementally** (only changed data)
+when the query shape allows it, rather than recomputing. The SQL is written to stay eligible:
+
+- No `current_date()` / `current_timestamp()` in SELECT lists (only in WHERE). This is why `dim_member`
+  exposes `birth_year` and the age band is computed at query time in `mv_claims` (age at incurred date).
+- `fact_member_month` joins eligibility spans to the `dim_date` month calendar instead of `explode()`.
+- Window functions use `PARTITION BY`; amounts are DECIMAL (no DOUBLE sums).
+- `hi-gold-refresh` first enables **row tracking + deletion vectors** on the silver source tables
+  (`gold_source_tables` variable), which some incremental techniques require.
+
+`dim_date` (static calendar) and `dq_gold_checks` (one-row global aggregate) are full recomputes by design.
+
+Check what each refresh actually did in the pipeline's Tables panel (Incrementalization column) or:
+
+```sql
+SELECT timestamp, message
+FROM event_log(TABLE(<gold_catalog>.<gold_schema>.dim_member))
+WHERE event_type = 'planning_information'
+ORDER BY timestamp DESC;
+```
+
+`FULL_RECOMPUTE` means it fell back; `ROW_BASED`, `WINDOW_FUNCTION`, `GROUP_AGGREGATE`, etc. are incremental.
+Once verified at volume you can pin large MVs with `REFRESH POLICY INCREMENTAL STRICT` so a fallback fails
+loudly instead of silently recomputing.
 
 ## Data quality
 
 `dq_gold_checks` is a one-row table whose **SDP expectations** are the quality gate:
 
-- **Hard (`ON VIOLATION FAIL UPDATE`)**: dimension PK uniqueness; fact grain uniqueness;
+- **Hard (`ON VIOLATION FAIL UPDATE`)**: dimension PK uniqueness; SCD2 surrogate-key uniqueness, no
+  overlapping versions and at most one current version per key; fact grain uniqueness;
   `fact_claim_line` row count = silver lines with a header; `agg_pmpm_monthly` paid total = claim paid total.
 - **Soft (warn)**: claim→member and claim→provider orphans ≤ 1%; member-month→plan orphans ≤ 1%;
-  claim lines with no eligibility in the incurred month ≤ 5%.
+  claim lines with no eligibility in the incurred month ≤ 5%; claim lines with no as-of `member_sk` ≤ 1%.
 
 Results show in the pipeline's data-quality tab and the event log. With synthetic sample data the
 soft checks will typically warn (random keys rarely line up across domains); that is expected.
@@ -174,12 +218,10 @@ soft checks will typically warn (random keys rarely line up across domains); tha
 - **Dimensions are Type 1 and keyed on silver natural keys.** Coverage history (plan, LOB, group over
   time) is carried by `fact_member_month`, built from effective-dated eligibility spans, and claims
   pick up plan/LOB from the member's eligibility in the incurred month.
-- **SCD Type 2 lives in silver** (`hi-silver-scd2`). Gold MVs are recomputed from silver and cannot
-  reconstruct history that silver never kept, so history is captured once in silver and gold SCD2
-  dimensions (next step: `dim_member_scd2` / `dim_provider_scd2` with surrogate keys and
-  `valid_from`/`valid_to`, facts looking up the version valid at `incurred_date`) are derived from it.
+- **SCD Type 2 history lives in silver** (`hi-silver-scd2`); the gold Type 2 dims are derived from it.
+  Gold MVs are recomputed from silver and cannot reconstruct history that silver never kept.
 - **No direct identifiers in gold.** Names, SSN, full DOB, street address, phone and email are not
-  carried forward; `dim_member` exposes `birth_year`, `age_band`, `state`, `zip3`.
+  carried forward; `dim_member` exposes `birth_year`, `state`, `zip3`.
 - **Generated model caveat.** The industry model is AI-generated and provided as-is. Validate
   business definitions (e.g. which claim statuses count as paid, how premium is expressed) with
   domain owners before relying on the KPIs.
@@ -191,13 +233,14 @@ databricks.yml                     bundle + variables + targets
 resources/silver_history.yml       history schema + SDP pipeline + job (enable CDF -> refresh)
 resources/gold_schema.yml          gold schema
 resources/gold_pipeline.yml        SDP pipeline (serverless)
-resources/gold_job.yml             job: pipeline refresh -> metric views
-src/pipeline/dimensions.sql        dim_date, dim_member, dim_provider, dim_plan
+resources/gold_job.yml             job: prepare sources -> pipeline refresh -> metric views
+src/pipeline/dimensions.sql        dim_date, dim_member, dim_provider, dim_plan (Type 1)
+src/pipeline/dimensions_scd2.sql   dim_member_scd2, dim_provider_scd2, dim_plan_scd2 (Type 2)
 src/pipeline/facts.sql             fact_member_month, fact_claim_line, fact_prior_auth
 src/pipeline/aggregates.sql        agg_pmpm_monthly
 src/pipeline/data_quality.sql      dq_gold_checks (expectations gate)
 src/silver_history/<domain>_scd2.sql  SCD2 AUTO CDC flows (member, provider, plan, employer, network)
-src/notebooks/enable_cdf.py        enables Change Data Feed on the history source tables
+src/notebooks/set_table_properties.py  sets CDF (silver history) / row tracking (gold) on source tables
 src/notebooks/create_metric_views.py  mv_pmpm, mv_claims, mv_prior_auth
 docs/bus_matrix.md                 bus matrix and modeling decisions
 ```

@@ -102,7 +102,13 @@ dimensions:
   - name: is_inpatient
     expr: is_inpatient
   - name: member_age_band
-    expr: mbr.age_band
+    expr: >-
+      CASE WHEN mbr.birth_year IS NULL THEN 'unknown'
+           WHEN year(incurred_month) - mbr.birth_year < 18 THEN '00-17'
+           WHEN year(incurred_month) - mbr.birth_year < 35 THEN '18-34'
+           WHEN year(incurred_month) - mbr.birth_year < 50 THEN '35-49'
+           WHEN year(incurred_month) - mbr.birth_year < 65 THEN '50-64'
+           ELSE '65+' END
   - name: member_gender
     expr: mbr.gender
   - name: member_state
