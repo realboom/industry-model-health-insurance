@@ -1,0 +1,28 @@
+resources:
+  jobs:
+    hi_gold_refresh:
+      name: hi-gold-refresh
+      description: >-
+        Refreshes the health insurance gold layer: runs the dimensional SDP pipeline
+        (dims, facts, aggregates and the dq_gold_checks expectations gate), then
+        (re)creates the gold metric views.
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: refresh_gold
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.hi_gold_pipeline.id}
+
+        - task_key: create_metric_views
+          depends_on:
+            - task_key: refresh_gold
+          notebook_task:
+            notebook_path: ../src/notebooks/create_metric_views.py
+            base_parameters:
+              gold_catalog: ${var.gold_catalog}
+              gold_schema: ${resources.schemas.gold.name}
+      # No job_clusters / environments: notebook tasks run on serverless jobs compute.
+      # Schedule is intentionally omitted; trigger after the silver load, e.g.:
+      # trigger:
+      #   table_update:
+      #     table_names:
+      #       - ${var.silver_catalog}.claim.line

@@ -1,0 +1,38 @@
+bundle:
+  name: industry-model-health-insurance
+
+include:
+  - resources/*.yml
+
+variables:
+  silver_catalog:
+    description: >-
+      Catalog holding the Databricks Industry Data Model (health_insurance ECM),
+      installed with cataloging style "One Catalog" (one schema per domain:
+      member, claim, plan, provider, utilization, ...).
+    default: health_insurance
+  gold_catalog:
+    description: Catalog the gold (Kimball dimensional) layer is published into. Must already exist.
+    default: health_insurance_gold
+  gold_schema:
+    description: Schema inside gold_catalog for dims, facts, aggregates and metric views. Created by this bundle.
+    default: core
+  date_dim_start:
+    description: First date in dim_date (YYYY-MM-DD).
+    default: "2015-01-01"
+  date_dim_end:
+    description: Last date in dim_date (YYYY-MM-DD).
+    default: "2035-12-31"
+
+targets:
+  dev:
+    mode: development
+    default: true
+    # workspace:
+    #   host: https://<your-dev-workspace>.azuredatabricks.net
+
+  prod:
+    mode: production
+    # workspace:
+    #   host: https://<your-prod-workspace>.azuredatabricks.net
+    #   root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}

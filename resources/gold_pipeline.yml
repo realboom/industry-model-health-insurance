@@ -1,0 +1,19 @@
+resources:
+  pipelines:
+    hi_gold_pipeline:
+      name: hi-gold-dimensional
+      catalog: ${var.gold_catalog}
+      schema: ${resources.schemas.gold.name}
+      serverless: true
+      photon: true
+      channel: CURRENT
+      # Silver is read in batch (materialized views), so the silver tables do not
+      # need Change Data Feed or append-only semantics. Serverless MVs refresh
+      # incrementally where the query shape allows it.
+      configuration:
+        silver_catalog: ${var.silver_catalog}
+        date_dim_start: ${var.date_dim_start}
+        date_dim_end: ${var.date_dim_end}
+      libraries:
+        - glob:
+            include: ../src/pipeline/**

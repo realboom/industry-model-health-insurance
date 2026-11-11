@@ -1,0 +1,6 @@
+resources:
+  schemas:
+    gold:
+      catalog_name: ${var.gold_catalog}
+      name: ${var.gold_schema}
+      comment: Kimball dimensional gold layer built from the health_insurance industry data model (silver).
