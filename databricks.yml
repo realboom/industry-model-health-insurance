@@ -17,6 +17,15 @@ variables:
   gold_schema:
     description: Schema inside gold_catalog for dims, facts, aggregates and metric views. Created by this bundle.
     default: core
+  silver_history_schema:
+    description: Schema inside silver_catalog for the SCD Type 2 history tables. Created by this bundle.
+    default: history
+  scd2_source_tables:
+    description: >-
+      Comma-separated <domain>.<table> list of silver tables the history pipeline reads.
+      Change Data Feed is enabled on each by the hi-silver-history job. Keep in sync
+      with src/silver_history/*.sql.
+    default: member.identity,member.subscriber,provider.provider,provider.group_practice,provider.facility,plan.health_plan,plan.benefit_package,employer.group,network.provider_network
   date_dim_start:
     description: First date in dim_date (YYYY-MM-DD).
     default: "2015-01-01"

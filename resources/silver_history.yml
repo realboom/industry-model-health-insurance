@@ -1,0 +1,44 @@
+resources:
+  schemas:
+    silver_history:
+      catalog_name: ${var.silver_catalog}
+      name: ${var.silver_history_schema}
+      comment: >-
+        SCD Type 2 history of the health_insurance industry-model master tables, built by
+        the hi-silver-scd2 SDP pipeline from Change Data Feed. Kept in its own schema so a
+        reinstall of the model (which drops/replaces domain schemas) cannot touch history.
+
+  pipelines:
+    hi_silver_history_pipeline:
+      name: hi-silver-scd2
+      catalog: ${var.silver_catalog}
+      schema: ${resources.schemas.silver_history.name}
+      serverless: true
+      photon: true
+      channel: CURRENT
+      configuration:
+        silver_catalog: ${var.silver_catalog}
+      libraries:
+        - glob:
+            include: ../src/silver_history/**
+
+  jobs:
+    hi_silver_history:
+      name: hi-silver-history
+      description: >-
+        Enables Change Data Feed on the silver master tables (idempotent), then runs the
+        SDP pipeline that maintains their SCD Type 2 history. Run after each silver load.
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: enable_cdf
+          notebook_task:
+            notebook_path: ../src/notebooks/enable_cdf.py
+            base_parameters:
+              silver_catalog: ${var.silver_catalog}
+              tables: ${var.scd2_source_tables}
+
+        - task_key: refresh_history
+          depends_on:
+            - task_key: enable_cdf
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.hi_silver_history_pipeline.id}
